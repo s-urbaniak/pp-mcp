@@ -10,10 +10,13 @@ services:
         MCPUSER_GID: ${MCPUSER_GID:-100}
     container_name: pp-mcp-server
     ports:
-      # Bound to the NAS's localhost only (debug/direct access from the NAS shell).
-      # Public reachability goes through nginx-proxy-manager (network "nginx"
-      # below), not via an additional host port.
-      - "127.0.0.1:${MCP_SERVER_PORT:-8080}:8080"
+      # Defaults to the NAS's localhost only (debug/direct access from the NAS
+      # shell); public reachability goes through nginx-proxy-manager (network
+      # "nginx" below), not via an additional host port. Override MCP_BIND_HOST
+      # in a local, untracked .env to bind the port to a specific interface
+      # instead (e.g. a private VPN IP) for direct access that bypasses the
+      # reverse proxy.
+      - "${MCP_BIND_HOST:-127.0.0.1}:${MCP_SERVER_PORT:-8080}:8080"
     volumes:
       # Directory with all .portfolio files (read-only).
       - "${PP_HOST_PORTFOLIOS_DIR:-/volume1/PortfolioPerformance}:/data/portfolios:ro"
