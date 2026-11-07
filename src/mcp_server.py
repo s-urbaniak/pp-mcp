@@ -345,8 +345,15 @@ def get_holdings_history(
 
 @app.tool(
     description="Unrealized gain per position (open holdings): current value "
-                "minus cost basis using the moving-average-cost method (as "
-                "in PP's default, not FIFO). Returns per position "
+                "minus cost basis. Cost basis per method: 'fifo' (default; "
+                "matches German tax rules, where the oldest shares are sold "
+                "first) or 'moving_average' (PP's default view). With FIFO "
+                "and include_lots (automatically on when security is given), "
+                "each position also lists its remaining purchase lots "
+                "(purchaseDate, portfolio, shares, cost per share), oldest "
+                "first – use these to compute the cost basis of a "
+                "hypothetical sale of N shares (consume lots in order, per "
+                "portfolio). Returns per position "
                 "avgCostPerShareWithFees/WithoutFees, costBasisWithFees/"
                 "WithoutFees and unrealizedGainWithFees/WithoutFees – "
                 "'WithFees' includes buy/sell fees and taxes, 'WithoutFees' "
@@ -362,6 +369,8 @@ def get_unrealized_gains(
     date: Optional[str] = None,
     include_empty: bool = False,
     security: Optional[str] = None,
+    method: str = "fifo",
+    include_lots: Optional[bool] = None,
     source: Optional[str] = None,
 ) -> Any:
     """Unrealized gain per position as of a given date.
@@ -373,10 +382,14 @@ def get_unrealized_gains(
         include_empty: Also list fully sold positions (zero balance).
         security: Security as name, ISIN, WKN, ticker or UUID. Empty = all
             positions.
+        method: Cost-basis method: "fifo" (default) or "moving_average".
+        include_lots: List remaining FIFO purchase lots per position. Empty =
+            only when security is given. Ignored for moving_average.
     """
     try:
         return registry.get(source).unrealized_gains(
-            portfolio=portfolio_name, date=date, include_empty=include_empty, security=security
+            portfolio=portfolio_name, date=date, include_empty=include_empty,
+            security=security, method=method, include_lots=include_lots,
         )
     except Exception as e:
         return _error(e)
@@ -384,8 +397,9 @@ def get_unrealized_gains(
 
 @app.tool(
     description="Realized gain per security from sales (SALE/"
-                "OUTBOUND_DELIVERY) in a date range, using the "
-                "moving-average-cost method (as in PP's default, not FIFO). "
+                "OUTBOUND_DELIVERY) in a date range. Cost basis per method: "
+                "'fifo' (default, oldest lots sold first) or "
+                "'moving_average' (moving-average cost, PP's default view). "
                 "Returns per position sharesSold, proceedsWithFees/"
                 "WithoutFees, costBasisWithFees/WithoutFees and "
                 "realizedGainWithFees/WithoutFees – 'WithFees' includes sell "
@@ -402,6 +416,7 @@ def get_realized_gains(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     security: Optional[str] = None,
+    method: str = "fifo",
     source: Optional[str] = None,
 ) -> Any:
     """Realized gain per security in a date range.
@@ -413,10 +428,62 @@ def get_realized_gains(
         date_to: End date inclusive, ISO format YYYY-MM-DD.
         security: Security as name, ISIN, WKN, ticker or UUID. Empty = all
             positions.
+        method: Cost-basis method: "fifo" (default) or "moving_average".
     """
     try:
         return registry.get(source).realized_gains(
-            portfolio=portfolio_name, date_from=date_from, date_to=date_to, security=security
+            portfolio=portfolio_name, date_from=date_from, date_to=date_to,
+            security=security, method=method,
+        )
+    except Exception as e:
+        return _error(e)
+
+
+@app.tool(
+    description="Simulates selling a number of shares of one security from "
+                "one portfolio at a given price per share – e.g. 'what gain "
+                "(and tax base) would selling 10 shares of X at 450 EUR "
+                "produce?'. Uses FIFO by default (oldest lots first, as "
+                "required for German taxes) or 'moving_average'. Returns the "
+                "consumed purchase lots (purchaseDate, holdingDays, shares, "
+                "cost), costBasisWithFees/WithoutFees, gross/netProceeds, "
+                "gainWithFees/WithoutFees and the remaining position. price "
+                "is optional (default: most recent price, or price as of "
+                "date); fees = expected sale fees (default 0). If the "
+                "security is held in several portfolios, portfolio_name is "
+                "required (cost basis is per portfolio). Does NOT calculate "
+                "taxes: apply withholding tax, partial exemption for funds, "
+                "loss pots, allowance and church tax yourself. Read-only, "
+                "nothing is booked." + _SOURCE_DOC
+)
+def simulate_sale(
+    security: str,
+    shares: float,
+    price: Optional[float] = None,
+    portfolio_name: Optional[str] = None,
+    fees: Optional[float] = None,
+    date: Optional[str] = None,
+    method: str = "fifo",
+    source: Optional[str] = None,
+) -> Any:
+    """Simulate a (partial) sale and compute cost basis and gain.
+
+    Args:
+        security: Security as name, ISIN, WKN, ticker or UUID.
+        shares: Number of shares to sell (positive, fractions allowed).
+        price: Sale price per share in the security's currency. Empty =
+            most recent price (or price as of date).
+        portfolio_name: Portfolio/depot as name or UUID. Required if the
+            security is held in more than one portfolio.
+        fees: Expected sale fees (absolute amount). Empty = 0.
+        date: Holdings as of this date, ISO YYYY-MM-DD. Empty = today/all
+            transactions.
+        method: Cost-basis method: "fifo" (default) or "moving_average".
+    """
+    try:
+        return registry.get(source).simulate_sale(
+            security=security, shares=shares, price=price,
+            portfolio=portfolio_name, fees=fees, date=date, method=method,
         )
     except Exception as e:
         return _error(e)

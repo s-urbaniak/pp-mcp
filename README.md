@@ -5,7 +5,10 @@
 A read-only MCP server that provides filtered account and portfolio data from one or
 more [Portfolio Performance](https://www.portfolio-performance.info/) `.portfolio`
 files — e.g. to generate reports from them (transactions of an account,
-distributions/interest/taxes for a period, etc.).
+distributions/interest/taxes for a period, etc.). It also values holdings, computes
+realized and unrealized gains (FIFO by default, as German tax law requires, or
+Portfolio Performance's moving-average method) and can simulate the gain of a planned
+sale (`simulate_sale`) as the basis for a tax estimate.
 
 Files are only **read**, never modified. Supports unencrypted and AES-encrypted
 (password-protected) files. Works as a standard [MCP](https://modelcontextprotocol.io)

@@ -5,7 +5,11 @@
 Ein read-only MCP-Server, der Konten- und Depotdaten aus einer oder mehreren
 [Portfolio Performance](https://www.portfolio-performance.info/) `.portfolio`-Dateien
 gefiltert bereitstellt — z.B. um daraus Reports zu erzeugen (Umsätze eines Kontos,
-Ausschüttungen/Zinsen/Steuern eines Zeitraums usw.).
+Ausschüttungen/Zinsen/Steuern eines Zeitraums usw.). Außerdem bewertet er Bestände,
+berechnet realisierte und nicht realisierte Gewinne (standardmäßig nach FIFO, wie
+steuerlich vorgeschrieben, wahlweise nach dem gleitenden Durchschnitt von Portfolio
+Performance) und simuliert den Gewinn eines geplanten Verkaufs (`simulate_sale`) als
+Grundlage für eine Steuerschätzung.
 
 Dateien werden nur **gelesen**, nie verändert. Unterstützt unverschlüsselte und
 AES-verschlüsselte (passwortgeschützte) Dateien. Funktioniert als Standard-[MCP](https://modelcontextprotocol.io)-Server

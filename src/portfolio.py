@@ -623,23 +623,42 @@ class Portfolio:
             Decimal(0),
         )
 
-    def _cost_pools(self, as_of: Optional[datetime.date]):
-        """Builds a cost-basis pool per (portfolio, security) using the
-        moving-average-price method (as PP does by default), logging each
+    COST_METHODS = ("fifo", "moving_average")
+
+    @classmethod
+    def _check_cost_method(cls, method: str) -> str:
+        m = (method or "").strip().lower().replace("-", "_")
+        if m not in cls.COST_METHODS:
+            raise ValueError(
+                f"Unknown cost method '{method}'. Allowed: {', '.join(cls.COST_METHODS)}."
+            )
+        return m
+
+    def _cost_pools(self, as_of: Optional[datetime.date], method: str = "moving_average"):
+        """Builds a cost-basis pool per (portfolio, security), logging each
         sale as a realized-gain event along the way.
 
+        Each pool holds a list of lots ({date, shares, costFee, costNoFee}).
+        `method`:
+          - "moving_average" (PP default): a pool always holds at most one
+            merged lot, so every sale is costed at the current average price.
+          - "fifo": every purchase/inbound delivery is its own lot; sales and
+            transfers consume the oldest lots first.
+
         Processes transactions chronologically up to and including `as_of`
-        (or all, if None). PURCHASE/INBOUND_DELIVERY increase share count and
-        cost basis; SALE/OUTBOUND_DELIVERY reduce them proportionally at the
-        current average price and generate a realization event;
-        SECURITY_TRANSFER moves share count + cost basis proportionally
-        between the portfolio pools (no gain event). For each amount, both
-        the "with fees/taxes" and "without" variant are tracked: `amount` is
-        already fee-inclusive for PURCHASE, and already net thereof for SALE.
+        (or all, if None). PURCHASE/INBOUND_DELIVERY add shares and cost
+        basis; SALE/OUTBOUND_DELIVERY consume lots and generate a realization
+        event; SECURITY_TRANSFER moves the consumed lots (with their original
+        acquisition date) into the target portfolio's pool (no gain event).
+        For each amount, both the "with fees/taxes" and "without" variant are
+        tracked: `amount` is already fee-inclusive for PURCHASE, and already
+        net thereof for SALE.
 
         Returns (pools, events); pools: Dict[(portfolioUuid, securityUuid) -> dict
-        with shares/costFee/costNoFee]; events: list of realized sales.
+        with shares/costFee/costNoFee/lots]; events: list of realized sales.
         """
+        method = self._check_cost_method(method)
+        fifo = method == "fifo"
         data = self._ensure_loaded()
         txs = [
             t for t in data["transactions"]
@@ -648,11 +667,53 @@ class Portfolio:
         ]
         txs.sort(key=lambda t: t["date"])
 
-        def new_pool():
-            return {"shares": Decimal(0), "costFee": Decimal(0), "costNoFee": Decimal(0)}
-
-        pools: Dict[Any, dict] = defaultdict(new_pool)
+        pools: Dict[Any, dict] = defaultdict(lambda: {"lots": []})
         events: List[Dict[str, Any]] = []
+
+        def add_lots(pool: dict, lots: List[dict]) -> None:
+            if fifo:
+                pool["lots"].extend(lots)
+                # Transferred lots keep their acquisition date -> keep order.
+                pool["lots"].sort(key=lambda l: l["date"])
+            else:
+                if not pool["lots"]:
+                    pool["lots"].append({
+                        "date": lots[0]["date"], "shares": Decimal(0),
+                        "costFee": Decimal(0), "costNoFee": Decimal(0),
+                    })
+                merged = pool["lots"][0]
+                for l in lots:
+                    merged["shares"] += l["shares"]
+                    merged["costFee"] += l["costFee"]
+                    merged["costNoFee"] += l["costNoFee"]
+
+        def take(pool: dict, shares: Decimal) -> List[dict]:
+            """Removes up to `shares` from the front of the pool's lots and
+            returns the removed (partial) lots."""
+            taken: List[dict] = []
+            remaining = shares
+            lots = pool["lots"]
+            while remaining > 0 and lots:
+                lot = lots[0]
+                if lot["shares"] <= 0:
+                    lots.pop(0)
+                    continue
+                n = min(remaining, lot["shares"])
+                if n == lot["shares"]:
+                    taken.append(lots.pop(0))
+                else:
+                    ratio = n / lot["shares"]
+                    part = {
+                        "date": lot["date"], "shares": n,
+                        "costFee": lot["costFee"] * ratio,
+                        "costNoFee": lot["costNoFee"] * ratio,
+                    }
+                    lot["shares"] -= n
+                    lot["costFee"] -= part["costFee"]
+                    lot["costNoFee"] -= part["costNoFee"]
+                    taken.append(part)
+                remaining -= n
+            return taken
 
         for t in txs:
             sec = t["securityUuid"]
@@ -664,52 +725,43 @@ class Portfolio:
 
             if typ in ("PURCHASE", "INBOUND_DELIVERY"):
                 fee_tax = self._fee_tax_sum(t)
-                pool = pools[(pf, sec)]
-                pool["shares"] += shares
-                pool["costFee"] += t["amount"]
-                pool["costNoFee"] += t["amount"] - fee_tax
+                add_lots(pools[(pf, sec)], [{
+                    "date": t["date"].date(), "shares": shares,
+                    "costFee": t["amount"], "costNoFee": t["amount"] - fee_tax,
+                }])
 
             elif typ in ("SALE", "OUTBOUND_DELIVERY"):
+                taken = take(pools[(pf, sec)], shares)
+                if not taken:
+                    continue
+                sold = sum((l["shares"] for l in taken), Decimal(0))
+                cost_fee = sum((l["costFee"] for l in taken), Decimal(0))
+                cost_nofee = sum((l["costNoFee"] for l in taken), Decimal(0))
                 fee_tax = self._fee_tax_sum(t)
                 proceeds_fee = t["amount"]            # already net (fees/taxes deducted)
                 proceeds_nofee = t["amount"] + fee_tax  # gross proceeds
-                pool = pools[(pf, sec)]
-                if pool["shares"] > 0:
-                    sold = min(shares, pool["shares"])
-                    ratio = sold / pool["shares"]
-                    cost_fee = pool["costFee"] * ratio
-                    cost_nofee = pool["costNoFee"] * ratio
-                    pool["shares"] -= sold
-                    pool["costFee"] -= cost_fee
-                    pool["costNoFee"] -= cost_nofee
-                    events.append({
-                        "date": t["date"].date(),
-                        "securityUuid": sec,
-                        "portfolioUuid": pf,
-                        "shares": sold,
-                        "proceedsWithFees": proceeds_fee,
-                        "proceedsWithoutFees": proceeds_nofee,
-                        "costWithFees": cost_fee,
-                        "costWithoutFees": cost_nofee,
-                        "gainWithFees": proceeds_fee - cost_fee,
-                        "gainWithoutFees": proceeds_nofee - cost_nofee,
-                    })
+                events.append({
+                    "date": t["date"].date(),
+                    "securityUuid": sec,
+                    "portfolioUuid": pf,
+                    "shares": sold,
+                    "proceedsWithFees": proceeds_fee,
+                    "proceedsWithoutFees": proceeds_nofee,
+                    "costWithFees": cost_fee,
+                    "costWithoutFees": cost_nofee,
+                    "gainWithFees": proceeds_fee - cost_fee,
+                    "gainWithoutFees": proceeds_nofee - cost_nofee,
+                })
 
             elif typ == "SECURITY_TRANSFER":
-                src = pools[(pf, sec)]
-                if src["shares"] <= 0:
-                    continue
-                moved = min(shares, src["shares"])
-                ratio = moved / src["shares"]
-                cost_fee = src["costFee"] * ratio
-                cost_nofee = src["costNoFee"] * ratio
-                src["shares"] -= moved
-                src["costFee"] -= cost_fee
-                src["costNoFee"] -= cost_nofee
-                tgt = pools[(t.get("otherPortfolioUuid"), sec)]
-                tgt["shares"] += moved
-                tgt["costFee"] += cost_fee
-                tgt["costNoFee"] += cost_nofee
+                taken = take(pools[(pf, sec)], shares)
+                if taken:
+                    add_lots(pools[(t.get("otherPortfolioUuid"), sec)], taken)
+
+        for pool in pools.values():
+            pool["shares"] = sum((l["shares"] for l in pool["lots"]), Decimal(0))
+            pool["costFee"] = sum((l["costFee"] for l in pool["lots"]), Decimal(0))
+            pool["costNoFee"] = sum((l["costNoFee"] for l in pool["lots"]), Decimal(0))
 
         return pools, events
 
@@ -719,19 +771,30 @@ class Portfolio:
         date: Optional[str] = None,
         include_empty: bool = False,
         security: Optional[str] = None,
+        method: str = "fifo",
+        include_lots: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Unrealized price gain per position: current value minus cost basis
-        (moving average price), with and without fees/taxes.
+        """Unrealized price gain per position: current value minus cost basis,
+        with and without fees/taxes. Cost basis per `method`: "fifo"
+        (default) or "moving_average". With FIFO, `include_lots` adds the
+        remaining purchase lots per position (oldest first = sold first);
+        None means: only when `security` is given.
         """
+        method = self._check_cost_method(method)
+        if include_lots is None:
+            include_lots = bool(security)
+        include_lots = include_lots and method == "fifo"
         data = self._ensure_loaded()
         pf_uuid = self._resolve(portfolio, data["portfolios"]) if portfolio else None
         sec_uuid_filter = self._find_security(security)["uuid"] if security else None
         as_of = datetime.date.fromisoformat(date) if date else None
-        pools, _ = self._cost_pools(as_of)
+        pools, _ = self._cost_pools(as_of, method)
         sec_by_uuid = {s["uuid"]: s for s in data["securities"]}
+        pf_names = {p["uuid"]: p.get("name") for p in data["portfolios"]}
 
         agg: Dict[str, dict] = defaultdict(lambda: {
-            "shares": Decimal(0), "costFee": Decimal(0), "costNoFee": Decimal(0)
+            "shares": Decimal(0), "costFee": Decimal(0), "costNoFee": Decimal(0),
+            "lots": [],
         })
         for (pf, sec), pool in pools.items():
             if pf_uuid and pf != pf_uuid:
@@ -742,6 +805,20 @@ class Portfolio:
             a["shares"] += pool["shares"]
             a["costFee"] += pool["costFee"]
             a["costNoFee"] += pool["costNoFee"]
+            if include_lots:
+                for lot in pool["lots"]:
+                    if lot["shares"] <= 0:
+                        continue
+                    a["lots"].append({
+                        "purchaseDate": lot["date"],
+                        "portfolioUuid": pf,
+                        "portfolioName": pf_names.get(pf),
+                        "shares": lot["shares"],
+                        "costPerShareWithFees": lot["costFee"] / lot["shares"],
+                        "costPerShareWithoutFees": lot["costNoFee"] / lot["shares"],
+                        "costBasisWithFees": lot["costFee"],
+                        "costBasisWithoutFees": lot["costNoFee"],
+                    })
 
         positions: List[Dict[str, Any]] = []
         totals_fee: Dict[str, Decimal] = defaultdict(lambda: Decimal(0))
@@ -765,7 +842,7 @@ class Portfolio:
                 totals_nofee[currency] += gain_nofee
             else:
                 missing_price += 1
-            positions.append({
+            position = {
                 "uuid": sec_uuid,
                 "name": s.get("name"),
                 "isin": s.get("isin"),
@@ -781,14 +858,24 @@ class Portfolio:
                 "value": value,
                 "unrealizedGainWithFees": gain_fee,
                 "unrealizedGainWithoutFees": gain_nofee,
-            })
+            }
+            if include_lots:
+                position["lots"] = sorted(
+                    a["lots"], key=lambda l: (l["purchaseDate"], l["portfolioName"] or "")
+                )
+            positions.append(position)
 
         positions.sort(key=lambda p: (p["value"] is None, -(p["value"] or Decimal(0))))
 
-        notes = [
-            "Cost basis using the moving-average-price method (PP default), "
-            "not FIFO."
-        ]
+        if method == "fifo":
+            notes = ["Cost basis using the FIFO method (remaining lots after "
+                     "oldest-first sales)."]
+            if include_lots:
+                notes.append("'lots' lists the remaining purchase lots, oldest "
+                             "first; under FIFO a sale consumes them in this "
+                             "order, separately per portfolio.")
+        else:
+            notes = ["Cost basis using the moving-average-price method (PP default)."]
         if len(totals_fee) > 1:
             notes.append("Multiple currencies – totals kept separate per currency, no conversion.")
         if missing_price:
@@ -796,6 +883,7 @@ class Portfolio:
 
         return _serialize({
             "portfolio": portfolio,
+            "method": method,
             "valuationDate": date,
             "baseCurrency": data["baseCurrency"],
             "positionCount": len(positions),
@@ -813,16 +901,19 @@ class Portfolio:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         security: Optional[str] = None,
+        method: str = "fifo",
     ) -> Dict[str, Any]:
         """Realized price gain per security from sales (SALE/OUTBOUND_DELIVERY)
-        within the period, with and without fees/taxes (moving average price).
+        within the period, with and without fees/taxes. Cost basis per
+        `method`: "fifo" (default) or "moving_average".
         """
+        method = self._check_cost_method(method)
         data = self._ensure_loaded()
         pf_uuid = self._resolve(portfolio, data["portfolios"]) if portfolio else None
         sec_uuid_filter = self._find_security(security)["uuid"] if security else None
         df = datetime.date.fromisoformat(date_from) if date_from else None
         dt = datetime.date.fromisoformat(date_to) if date_to else None
-        _, events = self._cost_pools(dt)
+        _, events = self._cost_pools(dt, method)
         sec_by_uuid = {s["uuid"]: s for s in data["securities"]}
 
         agg: Dict[str, dict] = defaultdict(lambda: {
@@ -873,15 +964,16 @@ class Portfolio:
 
         positions.sort(key=lambda p: -(p["realizedGainWithFees"] or Decimal(0)))
 
-        notes = [
-            "Cost basis using the moving-average-price method (PP default), "
-            "not FIFO."
-        ]
+        if method == "fifo":
+            notes = ["Cost basis using the FIFO method (oldest lots sold first)."]
+        else:
+            notes = ["Cost basis using the moving-average-price method (PP default)."]
         if len(totals_fee) > 1:
             notes.append("Multiple currencies – totals kept separate per currency, no conversion.")
 
         return _serialize({
             "portfolio": portfolio,
+            "method": method,
             "date_from": date_from,
             "date_to": date_to,
             "baseCurrency": data["baseCurrency"],
@@ -892,6 +984,166 @@ class Portfolio:
                 "withoutFees": {c: str(v) for c, v in sorted(totals_nofee.items())},
             },
             "positions": positions,
+            "note": " ".join(notes),
+        })
+
+    # ------------------------------------------------------- sale simulation
+    def simulate_sale(
+        self,
+        security: str,
+        shares: Any,
+        price: Any = None,
+        portfolio: Optional[str] = None,
+        fees: Any = None,
+        date: Optional[str] = None,
+        method: str = "fifo",
+    ) -> Dict[str, Any]:
+        """Simulates selling `shares` of `security` from one portfolio at
+        `price` per share (default: price as of `date` / most recent).
+
+        Uses the cost-basis pool of that portfolio as of `date` (default: all
+        transactions). With FIFO, the oldest lots are consumed first; returns
+        the consumed lots, cost basis, proceeds and gain (with/without fees),
+        plus the remaining position. No tax calculation.
+        """
+        method = self._check_cost_method(method)
+        data = self._ensure_loaded()
+        sec = self._find_security(security)
+        sec_uuid = sec["uuid"]
+        as_of = datetime.date.fromisoformat(date) if date else None
+
+        def dec(v, name):
+            if v is None or v == "":
+                return None
+            try:
+                return Decimal(str(v).replace(",", "."))
+            except Exception:
+                raise ValueError(f"Invalid number for {name}: {v!r}")
+
+        n = dec(shares, "shares")
+        if n is None or n <= 0:
+            raise ValueError("shares must be a positive number.")
+        fee_amount = dec(fees, "fees") or Decimal(0)
+        if fee_amount < 0:
+            raise ValueError("fees must not be negative.")
+
+        pools, _ = self._cost_pools(as_of, method)
+        held = {
+            pf: pool for (pf, s_uuid), pool in pools.items()
+            if s_uuid == sec_uuid and pool["shares"] > 0
+        }
+        pf_names = {p["uuid"]: p.get("name") for p in data["portfolios"]}
+
+        if portfolio:
+            pf_uuid = self._resolve(portfolio, data["portfolios"])
+        elif len(held) == 1:
+            pf_uuid = next(iter(held))
+        elif not held:
+            raise ValueError(f"No shares of '{sec.get('name')}' held"
+                             + (f" as of {date}." if date else "."))
+        else:
+            listing = ", ".join(
+                f"{pf_names.get(pf)} ({pool['shares']})" for pf, pool in held.items()
+            )
+            raise ValueError(
+                f"'{sec.get('name')}' is held in several portfolios ({listing}); "
+                "cost basis is tracked per portfolio – please specify portfolio_name."
+            )
+
+        pool = held.get(pf_uuid)
+        available = pool["shares"] if pool else Decimal(0)
+        if n > available:
+            raise ValueError(
+                f"Only {available} shares of '{sec.get('name')}' held in portfolio "
+                f"'{pf_names.get(pf_uuid)}', cannot sell {n}."
+            )
+
+        price_date, price_source = None, "given"
+        px = dec(price, "price")
+        if px is None:
+            px, price_date, price_source = self._price_asof(sec, as_of)
+            if px is None:
+                raise ValueError(f"No price available for '{sec.get('name')}'; please pass price.")
+        if px <= 0:
+            raise ValueError("price must be positive.")
+
+        today = as_of or datetime.date.today()
+        consumed: List[Dict[str, Any]] = []
+        remaining = n
+        cost_fee = cost_nofee = Decimal(0)
+        for lot in pool["lots"]:
+            if remaining <= 0:
+                break
+            if lot["shares"] <= 0:
+                continue
+            take = min(remaining, lot["shares"])
+            ratio = take / lot["shares"]
+            c_fee = lot["costFee"] * ratio
+            c_nofee = lot["costNoFee"] * ratio
+            cost_fee += c_fee
+            cost_nofee += c_nofee
+            remaining -= take
+            proceeds_part = take * px
+            consumed.append({
+                "purchaseDate": lot["date"],
+                "holdingDays": (today - lot["date"]).days,
+                "shares": take,
+                "costPerShareWithFees": lot["costFee"] / lot["shares"],
+                "costPerShareWithoutFees": lot["costNoFee"] / lot["shares"],
+                "costBasisWithFees": c_fee,
+                "costBasisWithoutFees": c_nofee,
+                "gainWithoutFees": proceeds_part - c_nofee,
+            })
+
+        gross = n * px
+        net = gross - fee_amount
+        rest_shares = available - n
+        rest_fee = pool["costFee"] - cost_fee
+        rest_nofee = pool["costNoFee"] - cost_nofee
+        currency = sec.get("currencyCode")
+
+        notes = [
+            "FIFO: the oldest lots of this portfolio are sold first (German tax rule)."
+            if method == "fifo" else
+            "Moving average: cost basis at the current average price of this portfolio.",
+            "'WithFees' = net proceeds (minus the given sale fees) against cost "
+            "basis including purchase fees; 'WithoutFees' = gross proceeds "
+            "against cost basis without purchase fees.",
+            "No tax calculated: withholding tax, partial exemption for funds "
+            "(Teilfreistellung), loss pots, tax-free allowance and church tax "
+            "are not part of the Portfolio Performance data.",
+        ]
+        if not fee_amount:
+            notes.append("No sale fees given (fees=0).")
+        if currency and data.get("baseCurrency") and currency != data["baseCurrency"]:
+            notes.append(f"Amounts in security currency {currency}, no conversion.")
+
+        return _serialize({
+            "security": {"uuid": sec_uuid, "name": sec.get("name"),
+                         "isin": sec.get("isin"), "currencyCode": currency},
+            "portfolio": {"uuid": pf_uuid, "name": pf_names.get(pf_uuid)},
+            "method": method,
+            "asOfDate": date,
+            "sharesSold": n,
+            "sharesHeldBefore": available,
+            "price": px,
+            "priceDate": price_date,
+            "priceSource": price_source,
+            "fees": fee_amount,
+            "grossProceeds": gross,
+            "netProceeds": net,
+            "costBasisWithFees": cost_fee,
+            "costBasisWithoutFees": cost_nofee,
+            "gainWithFees": net - cost_fee,
+            "gainWithoutFees": gross - cost_nofee,
+            "consumedLots": consumed if method == "fifo" else None,
+            "remainingPosition": {
+                "shares": rest_shares,
+                "costBasisWithFees": rest_fee,
+                "costBasisWithoutFees": rest_nofee,
+                "avgCostPerShareWithFees": (rest_fee / rest_shares) if rest_shares else None,
+                "avgCostPerShareWithoutFees": (rest_nofee / rest_shares) if rest_shares else None,
+            },
             "note": " ".join(notes),
         })
 

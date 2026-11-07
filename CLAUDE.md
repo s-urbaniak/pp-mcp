@@ -89,7 +89,23 @@ Deploy, nicht Teil der öffentlichen Doku) und nicht mehr in README/Wiki.
   `price_on`, `list_latest_prices`. `_find_security` wird auch von `unrealized_gains`/
   `realized_gains` genutzt, um deren optionalen `security`-Parameter aufzulösen (analog
   zum bestehenden `security`-Parameter bei `get_transactions`/`get_price_history`) — ohne
-  `security` liefern beide wie bisher alle Positionen. Bewertung: `holdings` (Bestand × Kurs zum Stichtag) über
+  `security` liefern beide wie bisher alle Positionen. Einstandswerte kommen aus
+  `_cost_pools(as_of, method)`: Pools je (Depot, Wertpapier) als Liste von Lots;
+  `method="moving_average"` hält genau ein zusammengeführtes Lot (Durchschnittspreis),
+  `method="fifo"` ein Lot je Kauf/Einlieferung, Verkäufe/Überträge verbrauchen die
+  ältesten zuerst (übertragene Lots behalten ihr Kaufdatum). `realized_gains` und
+  `unrealized_gains` haben beide den Parameter `method` mit Default **`fifo`**
+  (deutsches Steuerrecht). `unrealized_gains` liefert bei FIFO mit `include_lots`
+  (Default: automatisch an, wenn `security` gesetzt ist) je Position die verbleibenden
+  Kauf-Lots (ältestes zuerst, je Depot). Damit kann der Client den Einstandswert eines
+  hypothetischen Teilverkaufs selbst berechnen; Steuern rechnet pp-mcp bewusst nicht
+  (Verlusttöpfe/Freistellungsauftrag/Kirchensteuer sind nicht in PP). Bequemer geht
+  das mit `simulate_sale(security, shares, price, portfolio, fees, date, method)`:
+  verbraucht die Lots *eines* Depots (bei Bestand in mehreren Depots ist
+  `portfolio_name` Pflicht, sonst `ValueError`), liefert `consumedLots` (mit
+  `holdingDays`), Einstandswert, Brutto-/Nettoerlös, Gewinn mit/ohne Gebühren und die
+  Restposition. `price` optional (sonst `_price_asof`), `fees` = erwartete
+  Verkaufsgebühren (Default 0). Bucht nichts, rechnet keine Steuern. Bewertung: `holdings` (Bestand × Kurs zum Stichtag) über
   `_share_balances` (PURCHASE/SALE/Ein-/Auslieferung ±, `SECURITY_TRANSFER` Quelle−/Ziel+;
   ohne Depot-Filter heben sich Überträge auf) und `_price_asof`. `holdings_history`
   wiederholt dieselbe Bewertung für eine Serie von Stichtagen (`_sample_dates`:
