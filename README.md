@@ -58,6 +58,46 @@ If it's unclear whether "portfolio" refers to a source or a portfolio/depot in a
 given context, check `list_data_sources` and `list_portfolios` to see which one
 actually matches.
 
+## Changes
+
+A summary of notable changes, newest first. Parameters and return values of all tools
+are described in the
+[Function Reference](https://github.com/Nokke32/pp-mcp/wiki/Scripts-Function-Reference).
+
+**2026-11**
+- Realized and unrealized gains now use **FIFO by default** (as German tax law
+  requires); the new `method` parameter (`fifo` | `moving_average`) switches back to
+  Portfolio Performance's moving-average method.
+- `get_unrealized_gains` can return the remaining purchase lots per position
+  (`include_lots`, on automatically when `security` is set).
+- New tool **`simulate_sale`**: computes cost basis, proceeds and gain of a planned
+  (partial) sale from the FIFO lots of one portfolio — books nothing, calculates no
+  taxes.
+
+**2026-08**
+- Documentation moved to the
+  [Wiki](https://github.com/Nokke32/pp-mcp/wiki); the README is now a short
+  overview.
+- `mcp` dependency pinned to `<2` (v2 has breaking changes).
+- `docker-compose.yml`: optional `MCP_BIND_HOST` for binding the port directly
+  (e.g. in a VPN).
+
+**2026-07**
+- **Multi-source:** one server instance serves several `.portfolio` files
+  (`PP_PORTFOLIOS_CONFIG`, `source` parameter, `list_data_sources`).
+- New tools for prices (`get_latest_price`, `get_price_history`, `get_price_on`,
+  `list_latest_prices`), valuation (`get_holdings`, `get_holdings_history`), gains
+  (`get_unrealized_gains`, `get_realized_gains`), `get_account_balance`, taxonomies /
+  asset allocation (`list_taxonomies`, `get_asset_allocation`) and
+  `list_investment_plans`.
+- `list_price_feeds` / `refresh_prices`: fetch missing prices via the Ariva feed.
+- `stdio` transport in addition to `streamable-http`/`sse`
+  ([Configuring AI Tools](https://github.com/Nokke32/pp-mcp/wiki/Configuring-AI-Tools)).
+- Security hardening: sanitized error messages, enforceable auth
+  (`MCP_AUTH_TOKEN`), `MCP_SERVER_HOST` defaults to `127.0.0.1`.
+- Fixed price scaling in the parser; configurable `LOG_LEVEL`; tool descriptions in
+  English; MIT license.
+
 ## Structure
 
 - `src/config.py` — Pydantic settings (env / `.env`).

@@ -61,6 +61,47 @@ Ist im jeweiligen Kontext unklar, ob mit "Portfolio" eine Quelle oder ein Depot
 gemeint ist, hilft ein Blick in `list_data_sources` und `list_portfolios`, welche
 der beiden Bezeichnungen tatsächlich zutrifft.
 
+## Änderungen
+
+Zusammenfassung der wichtigsten Änderungen, neueste zuerst. Parameter und Rückgaben
+aller Tools beschreibt die
+[Function Reference](https://github.com/Nokke32/pp-mcp/wiki/Scripts-Function-Reference)
+im Wiki.
+
+**2026-11**
+- Realisierte und nicht realisierte Gewinne werden jetzt **standardmäßig nach FIFO**
+  berechnet (wie steuerlich vorgeschrieben); der neue Parameter `method`
+  (`fifo` | `moving_average`) schaltet auf den gleitenden Durchschnitt von Portfolio
+  Performance um.
+- `get_unrealized_gains` kann je Position die verbleibenden Kauf-Lots liefern
+  (`include_lots`, automatisch an, wenn `security` gesetzt ist).
+- Neues Tool **`simulate_sale`**: berechnet Einstandswert, Erlös und Gewinn eines
+  geplanten (Teil-)Verkaufs aus den FIFO-Lots eines Depots — bucht nichts, rechnet
+  keine Steuern.
+
+**2026-08**
+- Dokumentation ins [Wiki](https://github.com/Nokke32/pp-mcp/wiki)
+  verlagert; die README ist nur noch eine Kurzübersicht.
+- `mcp`-Abhängigkeit auf `<2` begrenzt (v2 bringt Breaking Changes).
+- `docker-compose.yml`: optionales `MCP_BIND_HOST` für eine direkte Port-Bindung
+  (z.B. im VPN).
+
+**2026-07**
+- **Multi-Source:** eine Server-Instanz bedient mehrere `.portfolio`-Dateien
+  (`PP_PORTFOLIOS_CONFIG`, Parameter `source`, `list_data_sources`).
+- Neue Tools für Kurse (`get_latest_price`, `get_price_history`, `get_price_on`,
+  `list_latest_prices`), Bewertung (`get_holdings`, `get_holdings_history`), Gewinne
+  (`get_unrealized_gains`, `get_realized_gains`), `get_account_balance`, Taxonomien/
+  Vermögensaufteilung (`list_taxonomies`, `get_asset_allocation`) und
+  `list_investment_plans`.
+- `list_price_feeds` / `refresh_prices`: fehlende Kurse über den Ariva-Feed nachladen.
+- `stdio`-Transport zusätzlich zu `streamable-http`/`sse`
+  ([Configuring AI Tools](https://github.com/Nokke32/pp-mcp/wiki/Configuring-AI-Tools)).
+- Sicherheitshärtung: bereinigte Fehlermeldungen, erzwingbare Auth
+  (`MCP_AUTH_TOKEN`), `MCP_SERVER_HOST` standardmäßig `127.0.0.1`.
+- Kurs-Skalierung im Parser korrigiert; `LOG_LEVEL` konfigurierbar;
+  Tool-Beschreibungen auf Englisch; MIT-Lizenz.
+
 ## Aufbau
 
 - `src/config.py` — Pydantic-Settings (Env / `.env`).
