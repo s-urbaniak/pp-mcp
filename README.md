@@ -98,6 +98,20 @@ are described in the
 - Fixed price scaling in the parser; configurable `LOG_LEVEL`; tool descriptions in
   English; MIT license.
 
+## Historical ECB rates for Python callers
+
+```python
+from src.ecb_rates import load_ecb_rates
+
+usd_to_eur = load_ecb_rates().history("USD", "EUR")
+```
+
+This returns EUR per USD on ECB observation dates. The library refreshes the
+historical archive on demand when the cache is missing or more than an hour old
+and falls back to the last valid cache if a refresh fails. Set
+`PP_ECB_CACHE_DIR` to use a different cache directory, or pass a local ECB ZIP or
+CSV path to `load_ecb_rates` for offline use.
+
 ## Structure
 
 - `src/config.py` — Pydantic settings (env / `.env`).
